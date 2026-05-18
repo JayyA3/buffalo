@@ -86,6 +86,9 @@ export default function Buffalo() {
   const [focusAgent, setFocusAgent] = useState(null);
   const [currentPrompt, setCurrentPrompt] = useState("");
   const [copied, setCopied] = useState(false);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [lastSwarmResults, setLastSwarmResults] = useState(null);
+  const [lastPromptUsed, setLastPromptUsed] = useState("");
 
   const buildRef = useRef(null);
   const abortRef = useRef(null);
@@ -100,6 +103,8 @@ export default function Buffalo() {
     setBuildOutput("");
     setFocusAgent(null);
     setCurrentPrompt(userPrompt);
+    setErrorMsg("");
+    setLastPromptUsed(userPrompt);
 
     const initData = {};
     AGENTS.forEach(a => { initData[a.id] = { content: "", status: "busy" }; });
@@ -126,6 +131,7 @@ Give your specialist analysis. Be concrete and detailed — your output feeds a 
       })
     ));
 
+    setLastSwarmResults(results);
     return results;
   };
 
@@ -173,8 +179,14 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
       }, ...prev].slice(0, 20));
     } catch (err) {
       if (err.name !== "AbortError") {
+        const msg = err.message.includes("429")
+          ? "Rate limited (429) — wait a moment then hit Retry."
+          : err.message.includes("404")
+          ? "Model not found (404) — check your API key."
+          : `Build failed: ${err.message}`;
+        setErrorMsg(msg);
         setPhase("error");
-        setBuildOutput(`Build failed: ${err.message}`);
+        setBuildOutput("");
       }
       setBuildStreaming(false);
     }
@@ -190,7 +202,20 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
     setTab("Build");
   };
 
-  const handleKey = (e) => {
+  const handleRetry = async () => {
+    if (!lastPromptUsed) return;
+    // If swarm already completed, skip straight to builder
+    if (lastSwarmResults && Object.keys(lastSwarmResults).length > 0) {
+      await runBuilder(lastPromptUsed, lastSwarmResults);
+    } else {
+      // Full restart
+      const swarmResults = await runSwarm(lastPromptUsed);
+      await runBuilder(lastPromptUsed, swarmResults);
+    }
+    setTab("Build");
+  };
+
+
     if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleBuild(); }
   };
 
@@ -239,7 +264,7 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
   const renderBuild = () => (
     <div style={S.wrap}>
       <div style={S.outputArea} ref={buildRef}>
-        {!buildOutput && !isBuilding && (
+        {!buildOutput && !isBuilding && phase !== "error" && (
           <div style={{ textAlign: "center", color: "#2A2A2A", marginTop: 60, lineHeight: 2.4 }}>
             <div style={{ fontSize: 36, marginBottom: 12 }}>🦬</div>
             <div>Describe any app you want.</div>
@@ -253,7 +278,24 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
             )}
           </div>
         )}
-        {buildOutput && (
+        {phase === "error" && (
+          <div style={{ textAlign: "center", marginTop: 60, lineHeight: 2 }}>
+            <div style={{ fontSize: 28, marginBottom: 12 }}>⚠</div>
+            <div style={{ color: "#EF4444", fontSize: 13, marginBottom: 6 }}>{errorMsg}</div>
+            <div style={{ color: "#4B5563", fontSize: 11, marginBottom: 24 }}>
+              {lastSwarmResults ? "Swarm completed — will skip straight to Builder on retry." : "Will restart from the beginning."}
+            </div>
+            <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+              <button style={{ ...S.dlBtn, background: "#F59E0B", padding: "10px 24px", fontSize: 12 }} onClick={handleRetry}>
+                ↻ Retry {lastSwarmResults ? "Builder" : "from start"}
+              </button>
+              <button style={{ ...S.copyBtn(false), padding: "10px 18px", fontSize: 12 }} onClick={() => { setPhase("idle"); setErrorMsg(""); }}>
+                Start over
+              </button>
+            </div>
+          </div>
+        )}
+
           <>
             <div style={{ color: "#4B5563", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
               {phase === "done" ? `✓ COMPLETE — ${cleanCode.split("\n").length} lines · ${Math.round(cleanCode.length / 1024)}KB` : "● BUILDING…"}
