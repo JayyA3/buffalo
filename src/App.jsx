@@ -1,9 +1,9 @@
 import { useState, useRef, useEffect, useCallback } from "react";
 
-// ── Streaming API call per agent ────────────────────────────────────────────
-async function callClaude(messages, systemPrompt, onChunk) {
+async function streamClaude(messages, system, onChunk, signal) {
   const res = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
+    signal,
     headers: {
       "Content-Type": "application/json",
       "x-api-key": import.meta.env.VITE_ANTHROPIC_KEY,
@@ -12,8 +12,8 @@ async function callClaude(messages, systemPrompt, onChunk) {
     },
     body: JSON.stringify({
       model: "claude-sonnet-4-5",
-      max_tokens: 800,
-      system: systemPrompt,
+      max_tokens: 4000,
+      system,
       stream: true,
       messages,
     }),
@@ -40,486 +40,367 @@ async function callClaude(messages, systemPrompt, onChunk) {
   return full;
 }
 
-// ── Agents ──────────────────────────────────────────────────────────────────
 const AGENTS = [
-  { id: "orchestrator", name: "Orchestrator", short: "ORCH", role: "Synthesizes inputs, routes tasks, coordinates the swarm", icon: "⬡", color: "#F59E0B" },
-  { id: "coder",        name: "Coder",        short: "CODE", role: "Writes, reviews and refactors code with best practices",  icon: "◈", color: "#10B981" },
-  { id: "researcher",  name: "Researcher",   short: "RSRC", role: "Gathers info, compares options, synthesizes findings",    icon: "◎", color: "#3B82F6" },
-  { id: "tester",      name: "Tester",       short: "TEST", role: "Identifies edge cases, writes tests, finds bugs",         icon: "◇", color: "#8B5CF6" },
-  { id: "security",    name: "Security",     short: "SEC",  role: "Audits for vulnerabilities, CVEs, and attack surfaces",   icon: "◉", color: "#EF4444" },
-  { id: "docs",        name: "Docs Writer",  short: "DOCS", role: "Creates documentation, readmes, and API references",      icon: "◫", color: "#06B6D4" },
+  { id: "architect", name: "Architect",   short: "ARCH", icon: "⬡", color: "#F59E0B", role: "Design the component structure, data flow, state management, and file layout. Be specific and technical." },
+  { id: "coder",     name: "Coder",       short: "CODE", icon: "◈", color: "#10B981", role: "Write the core React logic: hooks, state, event handlers, data operations. Focus on implementation details." },
+  { id: "ui",        name: "UI Designer", short: "UI",   icon: "◑", color: "#EC4899", role: "Design the complete UI: layout, color scheme, typography, spacing, responsive behavior. Be specific about values." },
+  { id: "data",      name: "Data Layer",  short: "DATA", icon: "◎", color: "#3B82F6", role: "Design the data model, localStorage schema, state shape, and data transformation logic needed." },
+  { id: "ux",        name: "UX",          short: "UX",   icon: "◇", color: "#8B5CF6", role: "Define user flows, interactions, feedback states (loading, empty, error, success), and edge cases." },
+  { id: "qa",        name: "QA",          short: "QA",   icon: "◉", color: "#EF4444", role: "Identify potential bugs, missing features, and what must be included for a complete working app." },
 ];
 
-const TABS = ["Swarm", "Memory", "Goals", "Logs"];
+const TABS = ["Build", "Swarm", "History"];
 
-const INITIAL_MEMORIES = [
-  { id: 1, key: "project_context", value: "Multi-agent orchestration platform — personal workspace", ts: "just now", tags: ["context"] },
-  { id: 2, key: "preferred_style", value: "Concise, actionable responses with code examples", ts: "just now", tags: ["style"] },
-];
+function fmt() { return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
 
-const SAMPLE_GOALS = [
-  { id: 1, title: "Ship auth refactor with tests", status: "planning", progress: 20, steps: ["Analyze current auth code", "Write unit tests", "Refactor implementation", "Open PR"] },
-  { id: 2, title: "Document REST API endpoints",   status: "idle",     progress: 0,  steps: ["Scan codebase", "Extract endpoints", "Generate OpenAPI spec", "Write markdown docs"] },
-];
-
-function formatTime(d = new Date()) {
-  return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+function Dot({ status }) {
+  const c = status === "busy" ? "#F59E0B" : status === "done" ? "#10B981" : status === "error" ? "#EF4444" : "#222";
+  return <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: c, boxShadow: status === "busy" ? `0 0 8px ${c}` : "none", transition: "all 0.3s" }} />;
 }
 
-function StatusDot({ status }) {
-  const col = status === "busy" ? "#F59E0B" : status === "done" ? "#10B981" : status === "error" ? "#EF4444" : "#2A2A2A";
+function Tag({ agent, dim }) {
   return (
-    <span style={{
-      display: "inline-block", width: 7, height: 7, borderRadius: "50%",
-      background: col,
-      boxShadow: status === "busy" ? `0 0 8px ${col}` : "none",
-      transition: "all 0.3s",
-    }} />
-  );
-}
-
-function AgentTag({ agent }) {
-  return (
-    <span style={{
-      display: "inline-flex", alignItems: "center", gap: 4,
-      padding: "2px 8px",
-      background: agent.color + "18",
-      border: `1px solid ${agent.color}44`,
-      borderRadius: 3, fontSize: 10,
-      color: agent.color,
-      fontFamily: "inherit", letterSpacing: "0.06em", fontWeight: 700,
-    }}>
+    <span style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: agent.color + (dim ? "10" : "18"), border: `1px solid ${agent.color}${dim ? "22" : "44"}`, borderRadius: 3, fontSize: 10, color: dim ? agent.color + "88" : agent.color, fontFamily: "inherit", letterSpacing: "0.06em", fontWeight: 700 }}>
       {agent.icon} {agent.short}
     </span>
   );
 }
 
+function downloadFile(filename, content) {
+  const blob = new Blob([content], { type: "text/plain" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
 export default function Buffalo() {
-  const [tab, setTab] = useState("Swarm");
-  const [input, setInput] = useState("");
-  const [submitting, setSubmitting] = useState(false);
-  const [rounds, setRounds] = useState([]);
-  const [memories, setMemories] = useState(INITIAL_MEMORIES);
-  const [goals, setGoals] = useState(SAMPLE_GOALS);
-  const [logs, setLogs] = useState([
-    { ts: formatTime(), level: "INFO", msg: "Buffalo initialized — swarm mode active" },
-    { ts: formatTime(), level: "INFO", msg: "6 agents registered — all respond in parallel" },
-  ]);
-  const [memInput, setMemInput] = useState({ key: "", value: "" });
-  const [goalInput, setGoalInput] = useState("");
-  const [expandedAgents, setExpandedAgents] = useState({});
-  const [focusedAgent, setFocusedAgent] = useState(null);
+  const [tab, setTab] = useState("Build");
+  const [prompt, setPrompt] = useState("");
+  const [phase, setPhase] = useState("idle");
+  const [swarmData, setSwarmData] = useState({});
+  const [buildOutput, setBuildOutput] = useState("");
+  const [buildStreaming, setBuildStreaming] = useState(false);
+  const [history, setHistory] = useState([]);
+  const [expanded, setExpanded] = useState({});
+  const [focusAgent, setFocusAgent] = useState(null);
+  const [currentPrompt, setCurrentPrompt] = useState("");
+  const [copied, setCopied] = useState(false);
 
-  const bottomRef = useRef(null);
-  const inputRef = useRef(null);
-
-  const addLog = useCallback((level, msg) => {
-    setLogs(prev => [...prev, { ts: formatTime(), level, msg }].slice(-300));
-  }, []);
+  const buildRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [rounds]);
+    if (buildRef.current) buildRef.current.scrollTop = buildRef.current.scrollHeight;
+  }, [buildOutput]);
 
-  // Check API key on load
-  useEffect(() => {
-    if (!import.meta.env.VITE_ANTHROPIC_KEY) {
-      addLog("ERROR", "VITE_ANTHROPIC_KEY not set — add it to .env or Vercel environment variables");
-    } else {
-      addLog("INFO", "API key loaded ✓");
-    }
-  }, []);
+  const runSwarm = async (userPrompt) => {
+    setPhase("swarming");
+    setSwarmData({});
+    setBuildOutput("");
+    setFocusAgent(null);
+    setCurrentPrompt(userPrompt);
 
-  const getSystemPrompt = (agent) => {
-    const memCtx = memories.map(m => `${m.key}: ${m.value}`).join("\n");
-    return `You are ${agent.name} in the Buffalo multi-agent swarm. Role: ${agent.role}.
+    const initData = {};
+    AGENTS.forEach(a => { initData[a.id] = { content: "", status: "busy" }; });
+    setSwarmData(initData);
 
-Memory context:
-${memCtx}
+    const ac = new AbortController();
+    abortRef.current = ac;
+    const results = {};
 
-IMPORTANT: You are one of 6 agents all responding to the same prompt simultaneously. Stay strictly in your lane — only give your specialist perspective. Be direct, dense, and actionable. No preamble. No intro sentences. Start your answer immediately. Max 3-4 short paragraphs or a tight list. Other agents are covering their domains in parallel.`;
+    await Promise.allSettled(AGENTS.map(agent =>
+      streamClaude(
+        [{ role: "user", content: userPrompt }],
+        `You are the ${agent.name} specialist in a multi-agent app-building swarm. ${agent.role}
+The user wants to build: "${userPrompt}"
+Give your specialist analysis. Be concrete and detailed — your output feeds a builder that writes the actual code. No preamble, start immediately.`,
+        (partial) => setSwarmData(prev => ({ ...prev, [agent.id]: { content: partial, status: "busy" } })),
+        ac.signal
+      ).then(final => {
+        results[agent.id] = final;
+        setSwarmData(prev => ({ ...prev, [agent.id]: { content: final, status: "done" } }));
+      }).catch(err => {
+        if (err.name !== "AbortError")
+          setSwarmData(prev => ({ ...prev, [agent.id]: { content: `Error: ${err.message}`, status: "error" } }));
+      })
+    ));
+
+    return results;
   };
 
-  const submit = async () => {
-    const text = input.trim();
-    if (!text || submitting) return;
+  const runBuilder = async (userPrompt, swarmResults) => {
+    setPhase("building");
+    setBuildStreaming(true);
+    setBuildOutput("");
 
-    if (!import.meta.env.VITE_ANTHROPIC_KEY) {
-      addLog("ERROR", "No API key — set VITE_ANTHROPIC_KEY in .env file or Vercel dashboard");
-      return;
+    const swarmContext = AGENTS.map(a =>
+      `=== ${a.name.toUpperCase()} ===\n${swarmResults[a.id] || "(no output)"}`
+    ).join("\n\n");
+
+    const ac = new AbortController();
+    abortRef.current = ac;
+
+    try {
+      const final = await streamClaude(
+        [{ role: "user", content: `Build this app: ${userPrompt}` }],
+        `You are an expert React developer. Six specialists analyzed the app request below. Synthesize ALL their input into a single complete, production-ready React component.
+
+SPECIALIST ANALYSIS:
+${swarmContext}
+
+RULES — follow exactly:
+- Output ONLY raw code. No explanation. No markdown fences. No comments outside code.
+- Single file complete App.jsx with default export: export default function App()
+- Import only from "react" — no external libraries
+- Use localStorage for persistence where needed
+- All states handled: empty, loading, error, success
+- Beautiful polished UI using inline styles (JS objects)
+- Dark theme, mobile responsive
+- Fully functional — not a skeleton, the real working app
+
+Start immediately with: import { useState, useEffect, useRef, useCallback } from "react";`,
+        (partial) => setBuildOutput(partial),
+        ac.signal
+      );
+
+      setBuildOutput(final);
+      setPhase("done");
+      setBuildStreaming(false);
+
+      setHistory(prev => [{
+        id: Date.now(), prompt: userPrompt, code: final, ts: fmt(), swarm: swarmResults,
+      }, ...prev].slice(0, 20));
+    } catch (err) {
+      if (err.name !== "AbortError") {
+        setPhase("error");
+        setBuildOutput(`Build failed: ${err.message}`);
+      }
+      setBuildStreaming(false);
     }
+  };
 
-    setInput("");
-    setSubmitting(true);
-    setFocusedAgent(null);
-
-    const roundId = Date.now();
-    const initResponses = {};
-    AGENTS.forEach(a => { initResponses[a.id] = { content: "", status: "busy", done: false }; });
-
-    setRounds(prev => [...prev, { id: roundId, prompt: text, ts: formatTime(), responses: initResponses }]);
-    addLog("INFO", `Swarm dispatch: "${text.slice(0, 60)}"`);
-
-    if (text.toLowerCase().includes("remember") || text.toLowerCase().includes("note that")) {
-      const m = { id: Date.now(), key: "user_note_" + Date.now(), value: text, ts: formatTime(), tags: ["auto"] };
-      setMemories(prev => [...prev, m]);
-      addLog("MEM", `Auto-stored: ${text.slice(0, 50)}`);
-    }
-
-    const history = [{ role: "user", content: text }];
-
-    const promises = AGENTS.map(agent =>
-      callClaude(history, getSystemPrompt(agent), (partial) => {
-        setRounds(prev => prev.map(r => r.id !== roundId ? r : {
-          ...r,
-          responses: { ...r.responses, [agent.id]: { content: partial, status: "busy", done: false } },
-        }));
-      }).then(final => {
-        setRounds(prev => prev.map(r => r.id !== roundId ? r : {
-          ...r,
-          responses: { ...r.responses, [agent.id]: { content: final, status: "done", done: true } },
-        }));
-        addLog("INFO", `[${agent.short}] done — ${final.split(" ").length} words`);
-      }).catch(err => {
-        setRounds(prev => prev.map(r => r.id !== roundId ? r : {
-          ...r,
-          responses: { ...r.responses, [agent.id]: { content: `Error: ${err.message}`, status: "error", done: true } },
-        }));
-        addLog("ERROR", `[${agent.short}] ${err.message}`);
-      })
-    );
-
-    await Promise.allSettled(promises);
-    setSubmitting(false);
-    addLog("INFO", "Swarm round complete");
+  const handleBuild = async () => {
+    const text = prompt.trim();
+    if (!text || phase === "swarming" || phase === "building") return;
+    setPrompt("");
+    setTab("Swarm");
+    const swarmResults = await runSwarm(text);
+    await runBuilder(text, swarmResults);
+    setTab("Build");
   };
 
   const handleKey = (e) => {
-    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); submit(); }
+    if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleBuild(); }
+  };
+
+  const stop = () => { abortRef.current?.abort(); setPhase("idle"); setBuildStreaming(false); };
+
+  const cleanCode = buildOutput.replace(/^```[a-z]*\n?/m, "").replace(/```\s*$/m, "").trim();
+  const isBuilding = phase === "swarming" || phase === "building";
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(cleanCode);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
   };
 
   const S = {
-    root: {
-      minHeight: "100vh", background: "#080808",
-      fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
-      color: "#E5E5E5", display: "flex", flexDirection: "column",
-    },
-    header: {
-      borderBottom: "1px solid #1A1A1A", background: "#0C0C0C",
-      padding: "0 20px", display: "flex", alignItems: "center", gap: 14, height: 50, flexShrink: 0,
-    },
+    root: { minHeight: "100vh", background: "#080808", fontFamily: "'JetBrains Mono', monospace", color: "#E5E5E5", display: "flex", flexDirection: "column" },
+    header: { borderBottom: "1px solid #1A1A1A", background: "#0C0C0C", padding: "0 20px", display: "flex", alignItems: "center", gap: 12, height: 50, flexShrink: 0 },
     brand: { fontSize: 17, fontWeight: 700, letterSpacing: "0.14em", color: "#F59E0B" },
-    version: { fontSize: 9, color: "#4B5563", letterSpacing: "0.1em" },
+    sub: { fontSize: 9, color: "#4B5563", letterSpacing: "0.1em" },
     tabBar: { display: "flex", borderBottom: "1px solid #1A1A1A", background: "#0C0C0C", paddingLeft: 14, flexShrink: 0 },
-    tab: (a) => ({
-      padding: "9px 18px", fontSize: 10, letterSpacing: "0.1em",
-      color: a ? "#F59E0B" : "#4B5563",
-      borderBottom: a ? "2px solid #F59E0B" : "2px solid transparent",
-      cursor: "pointer", userSelect: "none", transition: "color 0.1s",
-    }),
-    body: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
-    swarmFeed: { flex: 1, overflowY: "auto", padding: "16px 16px 8px" },
-    promptChip: {
-      background: "#141414", border: "1px solid #222",
-      borderRadius: 6, padding: "10px 14px", marginBottom: 10,
-      fontSize: 13, color: "#E5E5E5", display: "flex", gap: 10, alignItems: "flex-start",
-    },
-    agentGrid: { display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 8, marginBottom: 20 },
-    agentGridFocused: { display: "grid", gridTemplateColumns: "1fr", gap: 8, marginBottom: 20 },
-    agentCard: (agent, status) => ({
-      background: "#0E0E0E",
-      border: `1px solid ${status === "busy" ? agent.color + "66" : status === "done" ? agent.color + "28" : "#1A1A1A"}`,
-      borderRadius: 7, padding: "10px 12px", transition: "border-color 0.3s", position: "relative",
-    }),
-    cardHeader: { display: "flex", alignItems: "center", gap: 7, marginBottom: 7 },
-    cardContent: (expanded) => ({
-      fontSize: 12, color: "#C4C4C4", lineHeight: 1.65,
-      whiteSpace: "pre-wrap", wordBreak: "break-word",
-      maxHeight: expanded ? "none" : 120, overflow: "hidden", position: "relative",
-    }),
-    fadeOut: {
-      position: "absolute", bottom: 0, left: 0, right: 0, height: 40,
-      background: "linear-gradient(transparent, #0E0E0E)", pointerEvents: "none",
-    },
-    cursor: {
-      display: "inline-block", width: 7, height: 12, background: "#F59E0B", marginLeft: 2,
-      animation: "blink 1s step-end infinite", verticalAlign: "text-bottom",
-    },
-    inputBar: {
-      borderTop: "1px solid #1A1A1A", padding: "10px 16px",
-      display: "flex", gap: 8, alignItems: "flex-end",
-      background: "#0C0C0C", flexShrink: 0,
-    },
-    textarea: {
-      flex: 1, background: "#111", border: "1px solid #252525",
-      borderRadius: 6, padding: "9px 12px", color: "#E5E5E5", fontSize: 13,
-      fontFamily: "inherit", resize: "none", outline: "none", lineHeight: 1.5,
-      minHeight: 42, maxHeight: 140, transition: "border-color 0.15s",
-    },
-    sendBtn: (ok) => ({
-      background: ok ? "#F59E0B" : "#1A1A1A", color: ok ? "#080808" : "#3A3A3A",
-      border: "none", borderRadius: 6, padding: "9px 20px",
-      cursor: ok ? "pointer" : "default", fontSize: 11, fontFamily: "inherit",
-      fontWeight: 700, letterSpacing: "0.07em", transition: "all 0.15s", flexShrink: 0,
-    }),
-    swarmStatus: {
-      display: "flex", gap: 10, alignItems: "center",
-      padding: "5px 16px", borderTop: "1px solid #0F0F0F",
-      background: "#0A0A0A", flexShrink: 0,
-    },
+    tab: (a) => ({ padding: "9px 18px", fontSize: 10, letterSpacing: "0.1em", color: a ? "#F59E0B" : "#4B5563", borderBottom: a ? "2px solid #F59E0B" : "2px solid transparent", cursor: "pointer", userSelect: "none" }),
+    wrap: { flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" },
+    outputArea: { flex: 1, overflowY: "auto", padding: 16, fontFamily: "inherit", fontSize: 11, lineHeight: 1.7, color: "#C4C4C4", whiteSpace: "pre-wrap", wordBreak: "break-word", background: "#0A0A0A" },
+    inputBar: { borderTop: "1px solid #1A1A1A", padding: "12px 16px", background: "#0C0C0C", flexShrink: 0 },
+    promptRow: { display: "flex", gap: 8, marginBottom: 8 },
+    textarea: { flex: 1, background: "#111", border: "1px solid #252525", borderRadius: 6, padding: "10px 12px", color: "#E5E5E5", fontSize: 13, fontFamily: "inherit", resize: "none", outline: "none", lineHeight: 1.5, minHeight: 44, maxHeight: 120 },
+    buildBtn: (ok) => ({ background: ok ? "#F59E0B" : "#1A1A1A", color: ok ? "#080808" : "#333", border: "none", borderRadius: 6, padding: "10px 22px", cursor: ok ? "pointer" : "default", fontSize: 11, fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.07em", flexShrink: 0, transition: "all 0.15s" }),
+    stopBtn: { background: "#EF4444", color: "#fff", border: "none", borderRadius: 6, padding: "10px 16px", cursor: "pointer", fontSize: 11, fontFamily: "inherit", fontWeight: 700 },
+    dlBtn: { background: "#10B981", color: "#080808", border: "none", borderRadius: 5, padding: "8px 16px", cursor: "pointer", fontSize: 11, fontFamily: "inherit", fontWeight: 700 },
+    copyBtn: (done) => ({ background: done ? "#10B98122" : "#1F1F1F", color: done ? "#10B981" : "#9CA3AF", border: `1px solid ${done ? "#10B98144" : "#2A2A2A"}`, borderRadius: 5, padding: "8px 14px", cursor: "pointer", fontSize: 11, fontFamily: "inherit", transition: "all 0.2s" }),
+    actionRow: { display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 10 },
+    phaseBar: { display: "flex", gap: 10, alignItems: "center", marginBottom: 10, padding: "8px 12px", background: "#111", borderRadius: 6, border: "1px solid #1A1A1A" },
     panel: { flex: 1, overflowY: "auto", padding: "16px 20px" },
-    card: { background: "#0E0E0E", border: "1px solid #1A1A1A", borderRadius: 7, padding: "12px 14px", marginBottom: 10 },
-    cardTitle: { fontSize: 10, color: "#F59E0B", fontWeight: 700, letterSpacing: "0.1em", marginBottom: 8 },
-    inp: {
-      background: "#080808", border: "1px solid #252525", borderRadius: 5,
-      padding: "7px 10px", color: "#E5E5E5", fontSize: 12,
-      fontFamily: "inherit", outline: "none", width: "100%", boxSizing: "border-box",
-    },
-    btn: {
-      background: "#F59E0B", color: "#080808", border: "none",
-      borderRadius: 5, padding: "7px 14px", cursor: "pointer",
-      fontSize: 10, fontFamily: "inherit", fontWeight: 700, letterSpacing: "0.07em",
-    },
-    btnGhost: {
-      background: "transparent", color: "#4B5563", border: "1px solid #1F1F1F",
-      borderRadius: 4, padding: "4px 9px", cursor: "pointer", fontSize: 10, fontFamily: "inherit",
-    },
-    tag: (c = "#F59E0B") => ({
-      display: "inline-block", fontSize: 9, padding: "2px 6px",
-      background: c + "18", border: `1px solid ${c}33`,
-      borderRadius: 3, color: c, marginRight: 4, letterSpacing: "0.06em", cursor: "pointer",
-    }),
-    progressBar: (pct, c = "#F59E0B") => ({
-      height: 3, borderRadius: 2,
-      background: `linear-gradient(90deg, ${c} ${pct}%, #1A1A1A ${pct}%)`, marginTop: 6,
-    }),
-    logLine: (lv) => ({
-      fontSize: 10, padding: "3px 0", borderBottom: "1px solid #0D0D0D",
-      color: lv === "ERROR" ? "#EF4444" : lv === "MEM" ? "#3B82F6" : lv === "GOAL" ? "#8B5CF6" : "#4B5563",
-      display: "flex", gap: 10,
-    }),
+    swarmFeed: { flex: 1, overflowY: "auto", padding: "14px 16px" },
+    grid: (f) => ({ display: "grid", gridTemplateColumns: f ? "1fr" : "repeat(3, 1fr)", gap: 8, marginBottom: 16 }),
+    card: (agent, status) => ({ background: "#0E0E0E", border: `1px solid ${status === "busy" ? agent.color + "66" : status === "done" ? agent.color + "28" : "#1A1A1A"}`, borderRadius: 7, padding: "10px 12px", transition: "border-color 0.3s", position: "relative" }),
+    cardHead: { display: "flex", alignItems: "center", gap: 7, marginBottom: 7 },
+    cardBody: (e) => ({ fontSize: 11, color: "#C4C4C4", lineHeight: 1.65, whiteSpace: "pre-wrap", wordBreak: "break-word", maxHeight: e ? "none" : 110, overflow: "hidden", position: "relative" }),
+    fade: { position: "absolute", bottom: 0, left: 0, right: 0, height: 36, background: "linear-gradient(transparent, #0E0E0E)", pointerEvents: "none" },
+    cursor: { display: "inline-block", width: 7, height: 12, background: "#F59E0B", marginLeft: 2, animation: "blink 1s step-end infinite", verticalAlign: "text-bottom" },
+    ghost: { background: "transparent", color: "#4B5563", border: "1px solid #1F1F1F", borderRadius: 4, padding: "3px 8px", cursor: "pointer", fontSize: 9, fontFamily: "inherit" },
+    tag: (c = "#F59E0B", dim) => ({ display: "inline-block", fontSize: 9, padding: "2px 6px", background: c + (dim ? "10" : "18"), border: `1px solid ${c}${dim ? "22" : "33"}`, borderRadius: 3, color: dim ? c + "77" : c, marginRight: 4, letterSpacing: "0.06em", cursor: "pointer" }),
+    histCard: { background: "#0E0E0E", border: "1px solid #1A1A1A", borderRadius: 7, padding: "12px 14px", marginBottom: 10 },
   };
 
-  const renderSwarm = () => {
-    const canSend = !submitting && input.trim() && !!import.meta.env.VITE_ANTHROPIC_KEY;
-    return (
-      <div style={S.body}>
-        <div style={S.swarmFeed}>
-          {rounds.length === 0 && (
-            <div style={{ textAlign: "center", color: "#2A2A2A", fontSize: 12, marginTop: 60, lineHeight: 2.2 }}>
-              <div style={{ fontSize: 36, marginBottom: 14 }}>🦬</div>
-              <div>All 6 agents respond to every prompt simultaneously.</div>
-              <div>Click an agent tag to focus. Expand cards to read in full.</div>
-              {!import.meta.env.VITE_ANTHROPIC_KEY && (
-                <div style={{ marginTop: 20, color: "#EF4444", fontSize: 11, lineHeight: 1.8 }}>
-                  ⚠ No API key detected.<br />
-                  Add VITE_ANTHROPIC_KEY to your .env file or Vercel environment variables.
-                </div>
-              )}
-              <div style={{ marginTop: 16, display: "flex", gap: 8, justifyContent: "center", flexWrap: "wrap" }}>
-                {AGENTS.map(a => <AgentTag key={a.id} agent={a} />)}
-              </div>
+  const renderBuild = () => (
+    <div style={S.wrap}>
+      <div style={S.outputArea} ref={buildRef}>
+        {!buildOutput && !isBuilding && (
+          <div style={{ textAlign: "center", color: "#2A2A2A", marginTop: 60, lineHeight: 2.4 }}>
+            <div style={{ fontSize: 36, marginBottom: 12 }}>🦬</div>
+            <div>Describe any app you want.</div>
+            <div>6 agents analyze it simultaneously,</div>
+            <div>then a builder synthesizes a complete deployable App.jsx.</div>
+            <div style={{ marginTop: 16, fontSize: 10, color: "#1F1F1F" }}>
+              ↓ Download → drop into Vite project → git push → live on Vercel
             </div>
-          )}
+            {!import.meta.env.VITE_ANTHROPIC_KEY && (
+              <div style={{ marginTop: 20, color: "#EF4444", fontSize: 11 }}>⚠ VITE_ANTHROPIC_KEY not set</div>
+            )}
+          </div>
+        )}
+        {buildOutput && (
+          <>
+            <div style={{ color: "#4B5563", fontSize: 9, marginBottom: 8, letterSpacing: "0.1em" }}>
+              {phase === "done" ? `✓ COMPLETE — ${cleanCode.split("\n").length} lines · ${Math.round(cleanCode.length / 1024)}KB` : "● BUILDING…"}
+            </div>
+            {buildOutput}
+            {buildStreaming && <span style={S.cursor} />}
+          </>
+        )}
+      </div>
 
-          {rounds.map(round => {
-            const doneCount = AGENTS.filter(a => round.responses[a.id]?.done).length;
-            const isFocused = focusedAgent !== null;
-            return (
-              <div key={round.id}>
-                <div style={S.promptChip}>
-                  <span style={{ color: "#4B5563", flexShrink: 0, fontSize: 10, marginTop: 1 }}>YOU</span>
-                  <span>{round.prompt}</span>
-                  <span style={{ marginLeft: "auto", color: "#2A2A2A", fontSize: 9, flexShrink: 0 }}>{round.ts}</span>
-                </div>
-
-                <div style={{ display: "flex", gap: 5, marginBottom: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <span style={{ fontSize: 9, color: "#3A3A3A" }}>FOCUS:</span>
-                  <span style={S.tag(focusedAgent === null ? "#F59E0B" : "#3A3A3A")} onClick={() => setFocusedAgent(null)}>ALL</span>
-                  {AGENTS.map(a => (
-                    <span key={a.id} style={S.tag(focusedAgent === a.id ? a.color : "#3A3A3A")}
-                      onClick={() => setFocusedAgent(focusedAgent === a.id ? null : a.id)}>
-                      {a.icon} {a.short}
-                    </span>
-                  ))}
-                  <span style={{ marginLeft: "auto", fontSize: 9, color: "#3A3A3A" }}>{doneCount}/{AGENTS.length} done</span>
-                </div>
-
-                <div style={isFocused ? S.agentGridFocused : S.agentGrid}>
-                  {AGENTS.filter(a => !isFocused || a.id === focusedAgent).map(agent => {
-                    const resp = round.responses[agent.id];
-                    const expandKey = `${round.id}-${agent.id}`;
-                    const isExpanded = expandedAgents[expandKey] || isFocused;
-                    const isLong = (resp?.content?.length || 0) > 280;
-
-                    return (
-                      <div key={agent.id} style={S.agentCard(agent, resp?.status)}>
-                        <div style={S.cardHeader}>
-                          <span style={{ color: agent.color, fontSize: 13 }}>{agent.icon}</span>
-                          <AgentTag agent={agent} />
-                          <StatusDot status={resp?.status || "idle"} />
-                          {resp?.status === "busy" && <span style={{ fontSize: 9, color: agent.color }}>live</span>}
-                          {resp?.done && <span style={{ fontSize: 9, color: "#3A3A3A", marginLeft: "auto" }}>{resp.content.split(" ").length}w</span>}
-                        </div>
-
-                        <div style={S.cardContent(isExpanded)}>
-                          {resp?.content || <span style={{ color: "#2A2A2A" }}>waiting…</span>}
-                          {resp?.status === "busy" && resp?.content && <span style={S.cursor} />}
-                          {!isExpanded && isLong && <div style={S.fadeOut} />}
-                        </div>
-
-                        {isLong && !isFocused && (
-                          <button style={{ ...S.btnGhost, marginTop: 6, fontSize: 9, padding: "3px 8px" }}
-                            onClick={() => setExpandedAgents(prev => ({ ...prev, [expandKey]: !prev[expandKey] }))}>
-                            {isExpanded ? "▲ collapse" : "▼ expand"}
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            );
-          })}
-          <div ref={bottomRef} />
-        </div>
-
-        <div style={S.swarmStatus}>
-          {AGENTS.map(a => {
-            const lastRound = rounds[rounds.length - 1];
-            const status = lastRound ? lastRound.responses[a.id]?.status : "idle";
-            return (
-              <div key={a.id} style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                <StatusDot status={status || "idle"} />
-                <span style={{ fontSize: 9, color: status === "done" ? a.color : status === "busy" ? a.color : "#2A2A2A" }}>{a.short}</span>
-              </div>
-            );
-          })}
-          <span style={{ marginLeft: "auto", fontSize: 9, color: "#2A2A2A" }}>
-            {submitting ? "● swarm active" : `${rounds.length} round${rounds.length !== 1 ? "s" : ""}`}
-          </span>
-        </div>
-
-        <div style={S.inputBar}>
+      <div style={S.inputBar}>
+        {phase === "done" && (
+          <div style={S.actionRow}>
+            <button style={S.dlBtn} onClick={() => downloadFile("App.jsx", cleanCode)}>↓ Download App.jsx</button>
+            <button style={S.copyBtn(copied)} onClick={handleCopy}>{copied ? "✓ Copied" : "Copy code"}</button>
+            <span style={{ fontSize: 9, color: "#3A3A3A" }}>Replace src/App.jsx → git push → Vercel redeploys</span>
+          </div>
+        )}
+        {isBuilding && (
+          <div style={S.phaseBar}>
+            <Dot status={phase === "swarming" ? "busy" : "done"} />
+            <span style={{ fontSize: 10, color: phase === "swarming" ? "#F59E0B" : "#10B981" }}>
+              {phase === "swarming" ? "Swarm analyzing…" : "✓ Swarm done"}
+            </span>
+            <span style={{ color: "#222", fontSize: 12 }}>→</span>
+            <Dot status={phase === "building" ? "busy" : "idle"} />
+            <span style={{ fontSize: 10, color: phase === "building" ? "#F59E0B" : "#4B5563" }}>
+              {phase === "building" ? "Builder writing your app…" : "Builder"}
+            </span>
+            <button style={{ ...S.stopBtn, marginLeft: "auto", padding: "4px 10px", fontSize: 10 }} onClick={stop}>■ Stop</button>
+          </div>
+        )}
+        <div style={S.promptRow}>
           <textarea
-            ref={inputRef}
             style={S.textarea}
-            placeholder="All 6 agents will respond simultaneously… (Enter to send)"
-            value={input}
-            onChange={e => setInput(e.target.value)}
+            placeholder='e.g. "a personal budget tracker with charts and categories" — Enter to build'
+            value={prompt}
+            onChange={e => setPrompt(e.target.value)}
             onKeyDown={handleKey}
             rows={1}
-            disabled={submitting}
+            disabled={isBuilding}
           />
-          <button style={S.sendBtn(canSend)} onClick={submit} disabled={!canSend}>
-            {submitting ? "RUNNING…" : "SWARM ▶"}
-          </button>
+          {isBuilding
+            ? <button style={S.stopBtn} onClick={stop}>■ Stop</button>
+            : <button style={S.buildBtn(!isBuilding && prompt.trim())} onClick={handleBuild} disabled={!prompt.trim()}>BUILD ▶</button>
+          }
         </div>
+        <div style={{ fontSize: 9, color: "#1F1F1F" }}>Swarm → Builder → App.jsx ready to deploy</div>
       </div>
-    );
-  };
-
-  const renderMemory = () => (
-    <div style={S.panel}>
-      <div style={{ ...S.card, background: "#0A0A0A" }}>
-        <div style={S.cardTitle}>ADD MEMORY</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input style={{ ...S.inp, flex: "0 0 140px" }} placeholder="key" value={memInput.key}
-            onChange={e => setMemInput(p => ({ ...p, key: e.target.value }))} />
-          <input style={S.inp} placeholder="value" value={memInput.value}
-            onChange={e => setMemInput(p => ({ ...p, value: e.target.value }))} />
-          <button style={S.btn} onClick={() => {
-            if (!memInput.key || !memInput.value) return;
-            setMemories(prev => [...prev, { id: Date.now(), key: memInput.key, value: memInput.value, ts: formatTime(), tags: ["manual"] }]);
-            addLog("MEM", `Stored: ${memInput.key}`);
-            setMemInput({ key: "", value: "" });
-          }}>STORE</button>
-        </div>
-        <div style={{ fontSize: 9, color: "#3A3A3A", marginTop: 8 }}>Memory is injected into every agent's context on each swarm call.</div>
-      </div>
-      {memories.map(m => (
-        <div key={m.id} style={S.card}>
-          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start" }}>
-            <div style={{ flex: 1 }}>
-              <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 4 }}>
-                <span style={{ fontSize: 11, color: "#F59E0B", fontWeight: 700 }}>{m.key}</span>
-                {m.tags.map(t => <span key={t} style={S.tag()}>{t}</span>)}
-                <span style={{ fontSize: 9, color: "#3A3A3A" }}>{m.ts}</span>
-              </div>
-              <div style={{ fontSize: 12, color: "#9CA3AF", lineHeight: 1.5 }}>{m.value}</div>
-            </div>
-            <button style={S.btnGhost} onClick={() => { setMemories(prev => prev.filter(x => x.id !== m.id)); addLog("MEM", `Deleted: ${m.key}`); }}>✕</button>
-          </div>
-        </div>
-      ))}
     </div>
   );
 
-  const renderGoals = () => (
-    <div style={S.panel}>
-      <div style={{ ...S.card, background: "#0A0A0A" }}>
-        <div style={S.cardTitle}>NEW GOAL</div>
-        <div style={{ display: "flex", gap: 8 }}>
-          <input style={S.inp} placeholder="Describe a goal in plain English…"
-            value={goalInput} onChange={e => setGoalInput(e.target.value)}
-            onKeyDown={e => {
-              if (e.key === "Enter" && goalInput.trim()) {
-                setGoals(prev => [...prev, { id: Date.now(), title: goalInput.trim(), status: "planning", progress: 0, steps: ["Analyze requirements", "Plan execution", "Execute", "Verify"] }]);
-                addLog("GOAL", goalInput); setGoalInput("");
-              }
-            }} />
-          <button style={S.btn} onClick={() => {
-            if (!goalInput.trim()) return;
-            setGoals(prev => [...prev, { id: Date.now(), title: goalInput.trim(), status: "planning", progress: 0, steps: ["Analyze requirements", "Plan execution", "Execute", "Verify"] }]);
-            addLog("GOAL", goalInput); setGoalInput("");
-          }}>PLAN</button>
-        </div>
-      </div>
-      {goals.map(g => {
-        const sc = g.status === "complete" ? "#10B981" : g.status === "running" ? "#F59E0B" : g.status === "planning" ? "#3B82F6" : "#4B5563";
-        return (
-          <div key={g.id} style={S.card}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
-              <div style={{ fontSize: 12, color: "#E5E5E5", fontWeight: 700 }}>{g.title}</div>
-              <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                <span style={S.tag(sc)}>{g.status.toUpperCase()}</span>
-                {g.status !== "complete" && (
-                  <button style={S.btn} onClick={() => setGoals(prev => prev.map(x => x.id !== g.id ? x : { ...x, progress: Math.min(x.progress + 25, 100), status: x.progress + 25 >= 100 ? "complete" : "running" }))}>▶</button>
-                )}
-              </div>
+  const renderSwarm = () => (
+    <div style={S.wrap}>
+      <div style={S.swarmFeed}>
+        {!currentPrompt
+          ? <div style={{ textAlign: "center", color: "#2A2A2A", fontSize: 12, marginTop: 60 }}>Swarm analysis appears here during a build.</div>
+          : <>
+            <div style={{ background: "#141414", border: "1px solid #222", borderRadius: 6, padding: "9px 14px", marginBottom: 10, fontSize: 12, color: "#E5E5E5", display: "flex", gap: 10 }}>
+              <span style={{ color: "#4B5563", fontSize: 10, flexShrink: 0 }}>PROMPT</span>
+              <span>{currentPrompt}</span>
             </div>
-            <div style={S.progressBar(g.progress, sc)} />
-            <div style={{ fontSize: 9, color: "#4B5563", marginTop: 3, marginBottom: 8 }}>{g.progress}%</div>
-            {g.steps.map((step, idx) => {
-              const done = g.progress > (idx / g.steps.length) * 100;
-              return (
-                <div key={idx} style={{ display: "flex", gap: 7, alignItems: "center", fontSize: 11, color: done ? "#6B7280" : "#3A3A3A", marginBottom: 3 }}>
-                  <span style={{ color: done ? "#10B981" : "#2A2A2A" }}>{done ? "✓" : "○"}</span>
-                  <span style={{ textDecoration: done ? "line-through" : "none" }}>{step}</span>
+            <div style={{ display: "flex", gap: 5, marginBottom: 10, flexWrap: "wrap", alignItems: "center" }}>
+              <span style={{ fontSize: 9, color: "#3A3A3A" }}>FOCUS:</span>
+              <span style={S.tag("#F59E0B", focusAgent !== null)} onClick={() => setFocusAgent(null)}>ALL</span>
+              {AGENTS.map(a => (
+                <span key={a.id} style={S.tag(a.color, focusAgent !== null && focusAgent !== a.id)}
+                  onClick={() => setFocusAgent(focusAgent === a.id ? null : a.id)}>
+                  {a.icon} {a.short}
+                </span>
+              ))}
+              <span style={{ marginLeft: "auto", fontSize: 9, color: "#3A3A3A" }}>
+                {AGENTS.filter(a => swarmData[a.id]?.status === "done").length}/{AGENTS.length} done
+              </span>
+            </div>
+            <div style={S.grid(focusAgent !== null)}>
+              {AGENTS.filter(a => !focusAgent || a.id === focusAgent).map(agent => {
+                const resp = swarmData[agent.id];
+                const isExp = expanded[agent.id] || focusAgent === agent.id;
+                const isLong = (resp?.content?.length || 0) > 260;
+                return (
+                  <div key={agent.id} style={S.card(agent, resp?.status || "idle")}>
+                    <div style={S.cardHead}>
+                      <span style={{ color: agent.color, fontSize: 13 }}>{agent.icon}</span>
+                      <Tag agent={agent} />
+                      <Dot status={resp?.status || "idle"} />
+                      {resp?.status === "busy" && <span style={{ fontSize: 9, color: agent.color }}>live</span>}
+                      {resp?.status === "done" && <span style={{ fontSize: 9, color: "#3A3A3A", marginLeft: "auto" }}>{resp.content.split(" ").length}w</span>}
+                    </div>
+                    <div style={S.cardBody(isExp)}>
+                      {resp?.content || <span style={{ color: "#222" }}>waiting…</span>}
+                      {resp?.status === "busy" && resp?.content && <span style={S.cursor} />}
+                      {!isExp && isLong && <div style={S.fade} />}
+                    </div>
+                    {isLong && focusAgent !== agent.id && (
+                      <button style={{ ...S.ghost, marginTop: 6 }}
+                        onClick={() => setExpanded(p => ({ ...p, [agent.id]: !p[agent.id] }))}>
+                        {isExp ? "▲ collapse" : "▼ expand"}
+                      </button>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+            {(phase === "building" || phase === "done") && buildOutput && (
+              <div style={{ background: "#0A0A0A", border: "1px solid #1A1A1A", borderRadius: 7, padding: "12px 14px" }}>
+                <div style={{ fontSize: 9, color: "#F59E0B", letterSpacing: "0.1em", marginBottom: 8 }}>
+                  {phase === "done" ? "✓ BUILDER COMPLETE" : "● BUILDER WRITING APP…"}
                 </div>
-              );
-            })}
-          </div>
-        );
-      })}
+                <div style={{ fontSize: 10, color: "#6B7280", lineHeight: 1.6, maxHeight: 80, overflow: "hidden" }}>
+                  {buildOutput.slice(0, 300)}…
+                </div>
+                <button style={{ ...S.dlBtn, marginTop: 8, fontSize: 10, padding: "6px 12px" }} onClick={() => setTab("Build")}>
+                  View full output →
+                </button>
+              </div>
+            )}
+          </>
+        }
+      </div>
     </div>
   );
 
-  const renderLogs = () => (
+  const renderHistory = () => (
     <div style={S.panel}>
-      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 10 }}>
-        <span style={{ fontSize: 10, color: "#4B5563" }}>{logs.length} events</span>
-        <button style={S.btnGhost} onClick={() => setLogs([])}>CLEAR</button>
-      </div>
-      <div style={{ ...S.card, padding: "8px 12px" }}>
-        {logs.slice().reverse().map((l, i) => (
-          <div key={i} style={S.logLine(l.level)}>
-            <span style={{ color: "#2A2A2A", flexShrink: 0 }}>{l.ts}</span>
-            <span style={{ flexShrink: 0, minWidth: 46 }}>[{l.level}]</span>
-            <span>{l.msg}</span>
-          </div>
-        ))}
-      </div>
+      {history.length === 0
+        ? <div style={{ textAlign: "center", color: "#2A2A2A", fontSize: 12, marginTop: 60 }}>Your built apps appear here.</div>
+        : history.map(h => {
+          const clean = h.code.replace(/^```[a-z]*\n?/m, "").replace(/```\s*$/m, "").trim();
+          return (
+            <div key={h.id} style={S.histCard}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+                <div style={{ fontSize: 12, color: "#E5E5E5", fontWeight: 700, flex: 1, marginRight: 10 }}>{h.prompt}</div>
+                <span style={{ fontSize: 9, color: "#3A3A3A", flexShrink: 0 }}>{h.ts}</span>
+              </div>
+              <div style={{ fontSize: 10, color: "#4B5563", marginBottom: 10 }}>
+                {clean.split("\n").length} lines · {Math.round(clean.length / 1024)}KB
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button style={S.dlBtn} onClick={() => downloadFile("App.jsx", clean)}>↓ Download</button>
+                <button style={S.copyBtn(false)} onClick={() => navigator.clipboard.writeText(clean)}>Copy</button>
+                <button style={S.copyBtn(false)} onClick={() => { setBuildOutput(h.code); setCurrentPrompt(h.prompt); setPhase("done"); setTab("Build"); }}>View</button>
+              </div>
+            </div>
+          );
+        })
+      }
     </div>
   );
 
@@ -532,18 +413,20 @@ IMPORTANT: You are one of 6 agents all responding to the same prompt simultaneou
         ::-webkit-scrollbar-track { background: #080808; }
         ::-webkit-scrollbar-thumb { background: #222; border-radius: 2px; }
         @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
-        textarea:focus { border-color: #F59E0B55 !important; }
+        textarea:focus { border-color: #F59E0B55 !important; outline: none; }
       `}</style>
 
       <div style={S.header}>
         <span style={{ fontSize: 20 }}>🦬</span>
         <div>
           <div style={S.brand}>BUFFALO</div>
-          <div style={S.version}>SWARM MODE — 6 AGENTS PARALLEL</div>
+          <div style={S.sub}>DESCRIBE → SWARM → BUILD → DEPLOY</div>
         </div>
         <div style={{ flex: 1 }} />
-        <div style={{ display: "flex", gap: 8 }}>
-          {AGENTS.map(a => <span key={a.id} style={{ fontSize: 10, color: a.color, opacity: 0.6 }} title={a.name}>{a.icon} {a.short}</span>)}
+        <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+          {phase === "swarming" && <><Dot status="busy" /><span style={{ fontSize: 9, color: "#F59E0B" }}>SWARMING</span></>}
+          {phase === "building" && <><Dot status="busy" /><span style={{ fontSize: 9, color: "#F59E0B" }}>BUILDING</span></>}
+          {phase === "done"     && <><Dot status="done" /><span style={{ fontSize: 9, color: "#10B981" }}>READY TO DEPLOY</span></>}
         </div>
       </div>
 
@@ -552,10 +435,9 @@ IMPORTANT: You are one of 6 agents all responding to the same prompt simultaneou
       </div>
 
       <div style={{ flex: 1, overflow: "hidden", display: "flex", flexDirection: "column" }}>
-        {tab === "Swarm"  && renderSwarm()}
-        {tab === "Memory" && renderMemory()}
-        {tab === "Goals"  && renderGoals()}
-        {tab === "Logs"   && renderLogs()}
+        {tab === "Build"   && renderBuild()}
+        {tab === "Swarm"   && renderSwarm()}
+        {tab === "History" && renderHistory()}
       </div>
     </div>
   );
