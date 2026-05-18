@@ -55,11 +55,59 @@ function fmtDate() {
   return new Date().toLocaleDateString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
+
 function downloadFile(filename, content) {
   const blob = new Blob([content], { type: "text/plain" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url; a.download = filename; a.click();
+  URL.revokeObjectURL(url);
+}
+
+function slugify(str) {
+  return str.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 40) || "my-app";
+}
+
+function makeProjectFiles(appCode, projectName) {
+  const pkg = JSON.stringify({
+    name: projectName, version: "1.0.0",
+    scripts: { dev: "vite", build: "vite build", preview: "vite preview" },
+    dependencies: { react: "^18.2.0", "react-dom": "^18.2.0" },
+    devDependencies: { vite: "^5.0.0", "@vitejs/plugin-react": "^4.0.0" },
+  }, null, 2);
+  const viteConfig = `import { defineConfig } from 'vite'\nimport react from '@vitejs/plugin-react'\nexport default defineConfig({ plugins: [react()] })\n`;
+  const indexHtml = `<!DOCTYPE html>\n<html lang="en">\n  <head>\n    <meta charset="UTF-8" />\n    <meta name="viewport" content="width=device-width, initial-scale=1.0" />\n    <title>${projectName.replace(/\b\w/g, c => c.toUpperCase())}</title>\n  </head>\n  <body>\n    <div id="root"></div>\n    <script type="module" src="/src/main.jsx"></script>\n  </body>\n</html>\n`;
+  const mainJsx = `import React from 'react'\nimport ReactDOM from 'react-dom/client'\nimport App from './App.jsx'\nReactDOM.createRoot(document.getElementById('root')).render(\n  <React.StrictMode><App /></React.StrictMode>\n)\n`;
+  const gitignore = `node_modules\ndist\n.env\n.env.local\n.DS_Store\n`;
+  const readme = `# ${projectName}\n\nBuilt with Buffalo 🦬\n\n## Run locally\n\`\`\`\nnpm install\nnpm run dev\n\`\`\`\n\n## Deploy to Vercel\n1. Push to GitHub\n2. Import on vercel.com — auto-detects Vite\n3. Deploy\n`;
+  return { pkg, viteConfig, indexHtml, mainJsx, gitignore, readme };
+}
+
+async function downloadProjectZip(appCode, prompt) {
+  const projectName = slugify(prompt);
+  if (!window.JSZip) {
+    await new Promise((resolve, reject) => {
+      const s = document.createElement("script");
+      s.src = "https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js";
+      s.onload = resolve; s.onerror = reject;
+      document.head.appendChild(s);
+    });
+  }
+  const { pkg, viteConfig, indexHtml, mainJsx, gitignore, readme } = makeProjectFiles(appCode, projectName);
+  const zip = new window.JSZip();
+  const folder = zip.folder(projectName);
+  folder.file("package.json", pkg);
+  folder.file("vite.config.js", viteConfig);
+  folder.file("index.html", indexHtml);
+  folder.file(".gitignore", gitignore);
+  folder.file("README.md", readme);
+  const src = folder.folder("src");
+  src.file("main.jsx", mainJsx);
+  src.file("App.jsx", appCode);
+  const blob = await zip.generateAsync({ type: "blob" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url; a.download = `${projectName}.zip`; a.click();
   URL.revokeObjectURL(url);
 }
 
@@ -76,6 +124,7 @@ export default function Buffalo() {
   const [focusAgent, setFocusAgent] = useState(null);
   const [currentPrompt, setCurrentPrompt] = useState("");
   const [copied, setCopied] = useState(false);
+  const [zipping, setZipping] = useState(null); // null | "current" | historyId
   const [errorMsg, setErrorMsg] = useState("");
   const [lastSwarmResults, setLastSwarmResults] = useState(null);
   const [lastPromptUsed, setLastPromptUsed] = useState("");
@@ -603,12 +652,21 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
                     )}
                     {phase === "done" && (
                       <>
-                        <button className="dl-btn" onClick={() => downloadFile("App.jsx", cleanCode)} style={{
-                          background: "var(--green)", color: "white",
-                          border: "none", borderRadius: 8, padding: "7px 16px",
-                          fontSize: 12, fontWeight: 600, cursor: "pointer",
-                          fontFamily: "'DM Sans', sans-serif",
-                        }}>↓ Download App.jsx</button>
+                        <button className="dl-btn"
+                          disabled={zipping === "current"}
+                          onClick={async () => {
+                            setZipping("current");
+                            try { await downloadProjectZip(cleanCode, currentPrompt); } finally { setZipping(null); }
+                          }}
+                          style={{
+                            background: zipping === "current" ? "var(--green-light)" : "var(--green)",
+                            color: zipping === "current" ? "var(--green)" : "white",
+                            border: "none", borderRadius: 8, padding: "7px 16px",
+                            fontSize: 12, fontWeight: 600, cursor: zipping === "current" ? "default" : "pointer",
+                            fontFamily: "'DM Sans', sans-serif",
+                          }}>
+                          {zipping === "current" ? "⏳ Packaging…" : "↓ Download Project"}
+                        </button>
                         <button onClick={handleCopy} style={{
                           background: copied ? "var(--green-light)" : "white",
                           color: copied ? "var(--green)" : "var(--ink2)",
@@ -621,7 +679,7 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
                           {copied ? "✓ Copied" : "Copy code"}
                         </button>
                         <span style={{ fontSize: 11, color: "var(--ink3)", fontFamily: "'DM Mono', monospace" }}>
-                          Replace src/App.jsx → git push → live
+                          Unzip → push to GitHub → deploy on Vercel
                         </span>
                       </>
                     )}
@@ -954,13 +1012,27 @@ Start immediately with: import { useState, useEffect, useRef, useCallback } from
                         </div>
 
                         {/* Actions */}
-                        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
-                          <button className="dl-btn" onClick={() => downloadFile("App.jsx", h.clean || h.code)} style={{
-                            background: "var(--green)", color: "white",
-                            border: "none", borderRadius: 7, padding: "6px 12px",
-                            fontSize: 11, fontWeight: 600, cursor: "pointer",
-                            fontFamily: "'DM Sans', sans-serif",
-                          }}>↓ Download</button>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0, flexWrap: "wrap" }}>
+                          <button className="dl-btn"
+                            disabled={zipping === h.id}
+                            onClick={async () => {
+                              setZipping(h.id);
+                              try { await downloadProjectZip(h.clean || h.code, h.prompt); } finally { setZipping(null); }
+                            }}
+                            style={{
+                              background: zipping === h.id ? "var(--green-light)" : "var(--green)",
+                              color: zipping === h.id ? "var(--green)" : "white",
+                              border: "none", borderRadius: 7, padding: "6px 14px",
+                              fontSize: 11, fontWeight: 700, cursor: zipping === h.id ? "default" : "pointer",
+                              fontFamily: "'DM Sans', sans-serif",
+                            }}>
+                            {zipping === h.id ? "⏳ Packaging…" : "↓ Full Project"}
+                          </button>
+                          <button onClick={() => { downloadFile("App.jsx", h.clean || h.code); }} style={{
+                            background: "white", color: "var(--ink2)",
+                            border: "1px solid var(--border)", borderRadius: 7, padding: "6px 10px",
+                            fontSize: 11, cursor: "pointer", fontFamily: "'DM Sans', sans-serif",
+                          }}>App.jsx</button>
                           <button onClick={() => { navigator.clipboard.writeText(h.clean || h.code); }} style={{
                             background: "white", color: "var(--ink2)",
                             border: "1px solid var(--border)", borderRadius: 7, padding: "6px 10px",
